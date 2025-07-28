@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <title>Cloze-Test Generator</title>
+    <style>
+        body { font-family: sans-serif; margin: 2em; }
+        textarea { width: 100%; height: 150px; }
+        input[type='number'] { width: 60px; }
+        .word { display: inline-block; margin: 0 3px; }
+        .blank { width: 100px; padding: 2px; }
+        .correct { background-color: palegreen; }
+        .incorrect { background-color: lightcoral; }
+    </style>
+</head>
+<body>
+    <h1>Cloze-Test Generator</h1>
+    <label for="textInput">Text eingeben:</label><br>
+    <textarea id="textInput"></textarea><br><br>
+
+    <label for="difficulty">Schwierigkeit (% Lücken): </label>
+    <input type="number" id="difficulty" value="20" min="0" max="100"><br><br>
+
+    <label for="stopwordsInput">Zusätzliche Stoppwörter (kommagetrennt):</label><br>
+    <input type="text" id="stopwordsInput" placeholder="z. B.: der, die, das"><br><br>
+
+    <button onclick="generateCloze()">Lücken erstellen</button>
+    <button onclick="checkAnswers()">Antworten prüfen</button>
+
+    <p id="result"></p>
+    <div id="output" style="margin-top: 1em;"></div>
+
+    <script>
+        let hiddenWords = {}; // index: word
+
+        function generateCloze() {
+            const text = document.getElementById('textInput').value.trim();
+            const percent = parseInt(document.getElementById('difficulty').value);
+            const customStopwords = document.getElementById('stopwordsInput').value
+                .split(',')
+                .map(w => w.trim().toLowerCase())
+                .filter(w => w);
+
+            const stopwords = new Set([
+                "der", "die", "das", "ein", "eine", "und", "oder", "aber",
+                "nicht", "ist", "war", "wird", "auch", "so", "in", "im", "am", "an",
+                ...customStopwords
+            ]);
+
+            if (!text) return;
+
+            const words = text.split(/\s+/);
+            const total = words.length;
+            const numBlanks = Math.max(1, Math.round((percent / 100) * total));
+
+            const indices = [];
+            let attempts = 0;
+            while (indices.length < numBlanks && attempts < 1000) {
+                const idx = Math.floor(Math.random() * total);
+                const cleanWord = words[idx].replace(/[.,!?;:()]/g, '').toLowerCase();
+                if (!stopwords.has(cleanWord) && !indices.includes(idx)) {
+                    indices.push(idx);
+                }
+                attempts++;
+            }
+
+            hiddenWords = {};
+            const output = document.getElementById('output');
+            output.innerHTML = '';
+
+            words.forEach((word, idx) => {
+                const span = document.createElement('span');
+                span.classList.add('word');
+
+                if (indices.includes(idx)) {
+                    hiddenWords[idx] = word;
+                    const input = document.createElement('input');
+                    input.className = 'blank';
+                    input.setAttribute('data-index', idx);
+                    span.appendChild(input);
+                } else {
+                    span.textContent = word;
+                }
+                output.appendChild(span);
+            });
+
+            document.getElementById('result').textContent = '';
+        }
+
+        function checkAnswers() {
+            let correct = 0;
+            let total = Object.keys(hiddenWords).length;
+            const inputs = document.querySelectorAll('input.blank');
+
+            inputs.forEach(input => {
+                const idx = parseInt(input.getAttribute('data-index'));
+                const expected = hiddenWords[idx];
+                const answer = input.value.trim();
+
+                if (answer === expected) {
+                    input.classList.add('correct');
+                    input.classList.remove('incorrect');
+                    correct++;
+                } else {
+                    input.classList.add('incorrect');
+                    input.classList.remove('correct');
+                }
+            });
+
+            document.getElementById('result').textContent = `Richtig: ${correct}/${total}`;
+        }
+    </script>
+</body>
+</html>
