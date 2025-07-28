@@ -15,6 +15,7 @@
 </head>
 <body>
     <h1>Cloze-Test Generator</h1>
+    
     <label for="textInput">Text eingeben:</label><br>
     <textarea id="textInput"></textarea><br><br>
 
@@ -24,6 +25,9 @@
     <label for="stopwordsInput">Zusätzliche Stoppwörter (kommagetrennt):</label><br>
     <input type="text" id="stopwordsInput" placeholder="z. B.: der, die, das"><br><br>
 
+    <!-- NEU: Checkbox zur optionalen Trennung von Satzzeichen -->
+    <label><input type="checkbox" id="separateSyntax"> Syntax testen (Leerzeichen vor Satzzeichen)</label><br><br>
+
     <button onclick="generateCloze()">Lücken erstellen</button>
     <button onclick="checkAnswers()">Antworten prüfen</button>
 
@@ -31,11 +35,20 @@
     <div id="output" style="margin-top: 1em;"></div>
 
     <script>
-        let hiddenWords = {}; // index: word
+        let hiddenWords = {};
+
+        // NEU: Satzzeichen mit Leerzeichen vom Wort trennen
+        function separatePunctuation(text) {
+            return text
+                .replace(/([.,!?;:()])/g, ' $1')  // Leerzeichen vor Satzzeichen
+                .replace(/\s+/g, ' ')             // doppelte Leerzeichen reduzieren
+                .trim();                          // äußere Leerzeichen entfernen
+        }
 
         function generateCloze() {
-            const text = document.getElementById('textInput').value.trim();
+            let text = document.getElementById('textInput').value.trim();
             const percent = parseInt(document.getElementById('difficulty').value);
+            const doSeparateSyntax = document.getElementById('separateSyntax').checked;
             const customStopwords = document.getElementById('stopwordsInput').value
                 .split(',')
                 .map(w => w.trim().toLowerCase())
@@ -49,6 +62,11 @@
             ]);
 
             if (!text) return;
+
+            // Wenn Checkbox gesetzt ist → Text vorbereiten
+            if (doSeparateSyntax) {
+                text = separatePunctuation(text);
+            }
 
             const words = text.split(/\s+/);
             const total = words.length;
@@ -82,6 +100,7 @@
                 } else {
                     span.textContent = word;
                 }
+
                 output.appendChild(span);
             });
 
