@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<title>Cloze-Test Generator</title>
+<style>
+  body               { font-family:sans-serif; margin:2em; }
+  textarea           { width:100%; height:150px; }
+  input[type=number] { width:60px; }
+  .word              { display:inline-block; margin:0 3px; }
+  .blank             { width:100px; padding:2px; }
+  .math-blank        { width:120px; padding:2px; margin:2px 0; }
+  .correct           { background:palegreen; }
+  .incorrect         { background:lightcoral; }
+  .formula           { white-space:nowrap; }
+  #mathInputs label  { display:block; margin:.2em 0; }
+</style>
+
+<!-- MathJax 3 (TeX → SVG) -->
+<script>
+window.MathJax = {
+  tex : { inlineMath : [['$','$'],['\\(','\\)']],
+          displayMath: [['$$','$$'],['\\[','\\]']] },
+  svg : { fontCache:'global' }
+};
+</script>
+<script defer src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-svg.js"></script>
+</head>
+
+<body>
+<h1>Cloze-Test Generator</h1>
+
+<label for="textInput">Text eingeben:</label><br>
+<textarea id="textInput"></textarea><br><br>
+
+<label for="difficulty">Schwierigkeit (% Lücken): </label>
+<input type="number" id="difficulty" value="20" min="0" max="100"><br><br>
+
+<label for="stopwordsInput">Zusätzliche Stoppwörter (kommagetrennt):</label><br>
+<input type="text" id="stopwordsInput" placeholder="z. B.: der, die, das"><br><br>
+
+<label><input type="checkbox" id="ignorePunctuation"> Don't check punctuation</label><br>
+<label><input type="checkbox" id="processMath"> Перевіряти математичну нотацію</label><br><br>
+
+<button onclick="generateCloze()">Lücken erstellen</button>
+<button onclick="checkAnswers()">Antworten prüfen</button>
+
+<p id="result"></p>
+<div id="output" style="margin-top:1em;"></div>
+
+<h3 id="mathHeader" style="display:none;">Математичні відповіді</h3>
+<div id="mathInputs"></div>
+
+<script>
+/* -------------------------------------------------- */
+/* helpers                                            */
+/* -------------------------------------------------- */
+const isFormula = t => t.startsWith('$');
+function splitIntoTextAndFormula(str){
+  const re = /(\$\$[\s\S]*?\$\$|\$[^$]*?\$)/g;
+  const out = [];
+  let last = 0, match;
+  while ((match = re.exec(str)) !== null) {
+    if (match.index > last)
+      out.push(...str.slice(last, match.index).split(/\s+/).filter(Boolean));
+    out.push(match[0]);
+    last = re.lastIndex;
+  }
+  if (last < str.length)
+    out.push(...str.slice(last).split(/\s+/).filter(Boolean));
+  return out;
+}
+const endsWithP = w => /[.,!]$/.test(w);
+const endPunct  = w => endsWithP(w) ? w.slice(-1) : null;
+
+/* команди, які не чіпаємо */
+const RESERVED = new Set([
+  '\\frac','\\sqrt','\\sum','\\int','\\log','\\sin','\\cos','\\tan',
+  '\\left','\\right','\\big','\\Big','\\bigl','\\bigr','\\Bigl','\\Bigr'
+]);
+
+/* -------------------------------------------------- */
+/* globals                                            */
+/* -------------------------------------------------- */
+let hidden={}, counter=0;
+
+/* плейс‑холдер */
+function makePlaceholder(idx, original, isSuperOrSub){
+  const ph = `\\text{(${idx})}\\;\\underline{\\hphantom{${original}}}`;
+  return isSuperOrSub ? `{${ph}}` : ph;
+}
+
+/* -------------------------------------------------- */
+/* main                                               */
+/* -------------------------------------------------- */
+function generateCloze(){
+  const raw = document.getElementById('textInput').value.trim();
+  if(!raw) return;
+
+  const percent = +document.getElementById('difficulty').value;
+  const ignoreP = document.getElementById('ignorePunctuation').checked;
+  const mathOn  = document.getElementById('processMath').checked;
+
+  /* стоп‑слова */
+  const stop = new Set([
+    "der","die","das","ein","eine","und","oder","aber","nicht","ist",
+    "war","wird","auch","so","in","im","am","an",
+    ...document.getElementById('stopwordsInput').value
+        .split(',').map(s=>s.trim().toLowerCase()).filter(Boolean)
+  ]);
+
+  /* очистка старого виводу */
+  hidden={}; counter=0;
+  const out  = document.getElementById('output');      out.innerHTML='';
+  const mBox = document.getElementById('mathInputs');  mBox.innerHTML='';
+  document.getElementById('mathHeader').style.display='none';
+  document.getElementById('result').textContent='';
+
+  const tokens = splitIntoTextAndFormula(raw);
+
+  /* ---------------- текстові пропуски (БЕЗ порожніх) ----------- */
+  const textHideable = tokens
+        .map((t,i)=>{
+            if(isFormula(t)) return null;
+            const clean = t.replace(/[.,!?;:()]+$/,'');
+            if(!clean) return null;
+            if(stop.has(clean.toLowerCase())) return null;
+            return i;
+        })
+        .filter(i=>i!==null);
+
+  const maxTextBlanks = Math.max(1, Math.round(textHideable.length*percent/100));
+  const chosenText = new Set();
+  while(chosenText.size < maxTextBlanks && textHideable.length){
+    chosenText.add(textHideable.splice(Math.random()*textHideable.length|0,1)[0]);
+  }
+
+  /* -------------- обхід усіх токенів ---------------- */
+  tokens.forEach((tok,i)=>{
+    /* === FORMULA === */
+    if(isFormula(tok)){
+      const span = document.createElement('span');
+      span.className = 'word formula';
+
+      if(!mathOn){ span.textContent = tok; out.appendChild(span); return; }
+
+      const delim = tok.startsWith('$$') ? '$$' : '$';
+      const core  = tok.slice(delim.length,-delim.length);
+
+      /* лексеми усередині формули */
+      const lex = core.match(
+        /(\\[a-zA-Z]+|[a-zA-Z]+|\d+|[=+\-*/^_]|[{}[\]()]|\\,|\\;|\\!|,|\.|\\%|!|')/g
+      ) || [core];
+
+      /* відфільтровуємо, що можна ховати */
+      const hideable = lex
+            .map((lx,k)=>{
+              const cmd=/^\\[a-zA-Z]+$/.test(lx);
+              const ok = (
+                (cmd && !RESERVED.has(lx) && lx.length<=8) ||
+                (!cmd && /^[a-zA-Z]$/.test(lx))           ||
+                (!cmd && /^\d+$/.test(lx))                ||
+                /^\\(pi|infty)$/.test(lx)
+              );
+              return ok ? k : null;
+            }).filter(x=>x!==null);
+
+      const maxFormBlanks = Math.round(hideable.length*percent/100);
+      const chosenForm = new Set();
+      while(chosenForm.size < maxFormBlanks && hideable.length){
+        chosenForm.add(hideable.splice(Math.random()*hideable.length|0,1)[0]);
+      }
+
+      /* збираємо формулу із плейс‑холдерами */
+      const rebuilt=[];
+      lex.forEach((lx,k)=>{
+        if(chosenForm.has(k)){
+          ++counter; hidden[counter]=lx;
+          const prev = lex[k-1]||'';
+          const isSup = prev==='^'||prev==='_';
+          rebuilt.push(makePlaceholder(counter,lx,isSup));
+
+          /* input під текстом */
+          const lab=document.createElement('label');
+          lab.innerHTML=`(${counter}) <input class="blank math-blank" data-index="${counter}">`;
+          mBox.appendChild(lab);
+          document.getElementById('mathHeader').style.display='block';
+        }else{
+          rebuilt.push(lx);
+        }
+      });
+
+      /* --- Додаємо ПРОБІЛ після \cmd перед літерами --------------- */
+      let formulaStr='';
+      rebuilt.forEach((part,k)=>{
+        if(k>0){
+          const prev=rebuilt[k-1];
+          const needSpace=/^\\[a-zA-Z]+$/.test(prev) && /^[A-Za-z]/.test(part) && !part.startsWith('\\');
+          if(needSpace) formulaStr+=' ';
+        }
+        formulaStr+=part;
+      });
+
+      span.textContent = delim + formulaStr + delim;
+      out.appendChild(span);
+      return;
+    }
+
+    /* === ЗВИЧАЙНЕ СЛОВО === */
+    const span = document.createElement('span'); span.className='word';
+    if(chosenText.has(i)){
+      ++counter;
+      const punct = ignoreP ? endPunct(tok) : null;
+      const cleanTok = punct ? tok.slice(0,-1) : tok;
+      if(cleanTok.length===0){ span.textContent=tok; out.appendChild(span); return; }
+
+      hidden[counter]=cleanTok;
+      const inp=document.createElement('input');
+      inp.className='blank'; inp.dataset.index=counter;
+      span.appendChild(inp);
+      if(punct) span.appendChild(document.createTextNode(punct));
+    }else{
+      span.textContent=tok;
+    }
+    out.appendChild(span);
+  });
+
+  /* MathJax рендер */
+  if(window.MathJax) MathJax.typesetPromise([out]);
+}
+
+/* -------------------------------------------------- */
+/* checking                                           */
+/* -------------------------------------------------- */
+function checkAnswers(){
+  const inputs=document.querySelectorAll('input.blank');
+  let ok=0,total=inputs.length;
+  inputs.forEach(inp=>{
+    const id=+inp.dataset.index;
+    if(inp.value.trim()===hidden[id]){
+      inp.classList.add('correct');   inp.classList.remove('incorrect'); ++ok;
+    }else{
+      inp.classList.add('incorrect'); inp.classList.remove('correct');
+    }
+  });
+  document.getElementById('result').textContent=`Richtig: ${ok}/${total}`;
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="de">
+
+<head>
+    <meta charset="UTF-8">
+    <title>Cloze‑Test Generator</title>
+    <style>
+        body {
+            font-family: sans-serif;
+            margin: 2em;
+        }
+
+        textarea {
+            width: 100%;
+            height: 150px;
+        }
+
+        input[type='number'] {
+            width: 60px;
+        }
+
+        .word {
+            display: inline-block;
+            margin: 0 3px;
+        }
+
+        .blank {
+            width: 100px;
+            padding: 2px;
+        }
+
+        .correct {
+            background-color: palegreen;
+        }
+
+        .incorrect {
+            background-color: lightcoral;
+        }
+
+        .formula {
+            white-space: nowrap;
+        }
+
+        /*— формула як один блок —*/
+    </style>
+
+    <script>
+        window.MathJax = {
+            tex: {
+                inlineMath: [['$', '$'], ['\\(', '\\)']],
+                displayMath: [['$$', '$$'], ['\\[', '\\]']]
+            },
+            svg: { fontCache: 'global' }          /* швидке SVG‑рендерення */
+        };
+    </script>
+    <script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-svg.js"></script>
+</head>
+
+<body>
+    <h1>Cloze‑Test Generator</h1>
+
+    <label for="textInput">Text eingeben:</label><br>
+    <textarea id="textInput"></textarea><br><br>
+
+    <label for="difficulty">Schwierigkeit (% Lücken): </label>
+    <input type="number" id="difficulty" value="20" min="0" max="100"><br><br>
+
+    <label for="stopwordsInput">Zusätzliche Stoppwörter (kommagetrennt):</label><br>
+    <input type="text" id="stopwordsInput" placeholder="z. B.: der, die, das"><br><br>
+
+    <label><input type="checkbox" id="ignorePunctuation"> Don't check punctuation</label><br><br>
+
+    <button onclick="generateCloze()">Lücken erstellen</button>
+    <button onclick="checkAnswers()">Antworten prüfen</button>
+
+    <p id="result"></p>
+    <div id="output" style="margin-top: 1em;"></div>
+
+    <script>
+        /* --------------------------------------------------
+           Формульний парсер:
+           розбиває текст на «токени» — або цілу формулу,
+           або звичайні слова, не втрачаючи пробілів усередині $$ … $$.
+        -------------------------------------------------- */
+        function tokenizeText(text) {
+            const tokens = [];
+            const regex = /(\$\$[\s\S]*?\$\$|\$[^$]*?\$)/g; // $$…$$ або $…$
+            let last = 0, m;
+            while ((m = regex.exec(text)) !== null) {
+                if (m.index > last) {
+                    tokens.push(...text.slice(last, m.index).split(/\s+/).filter(Boolean));
+                }
+                tokens.push(m[0]);            // формула як один токен
+                last = regex.lastIndex;
+            }
+            if (last < text.length) {
+                tokens.push(...text.slice(last).split(/\s+/).filter(Boolean));
+            }
+            return tokens;
+        }
+        function isFormula(token) { return /^\$/.test(token); }
+
+        /* -------------------------------------------------- */
+        let hiddenWords = {};   // index → правильне слово
+
+        function generateCloze() {
+            const text = document.getElementById('textInput').value.trim();
+            if (!text) return;
+
+            const percent = +document.getElementById('difficulty').value;
+            const customStop = document.getElementById('stopwordsInput').value
+                .split(',').map(w => w.trim().toLowerCase()).filter(Boolean);
+
+            const stopwords = new Set([
+                "der", "die", "das", "ein", "eine", "und", "oder", "aber", "nicht", "ist",
+                "war", "wird", "auch", "so", "in", "im", "am", "an",
+                ...customStop
+            ]);
+
+            /* токени з урахуванням формул ----------------------------------- */
+            const words = tokenizeText(text);
+            const total = words.length;
+
+            /* список індексів, які МОЖНА ховати ------------------------------ */
+            const hideable = words
+                .map((w, i) => (!isFormula(w) && !stopwords.has(w.replace(/[.,!?;:()]/g, '').toLowerCase())) ? i : null)
+                .filter(i => i !== null);
+
+            const numBlanks = Math.max(1, Math.round((percent / 100) * hideable.length));
+            const indices = [];
+            while (indices.length < numBlanks && hideable.length) {
+                const pick = hideable.splice(Math.floor(Math.random() * hideable.length), 1)[0];
+                indices.push(pick);
+            }
+
+            hiddenWords = {};
+            const output = document.getElementById('output');
+            output.innerHTML = '';
+
+            words.forEach((word, idx) => {
+                const span = document.createElement('span');
+                span.classList.add('word');
+
+                /* якщо токен — повна формула, просто показуємо без змін ------ */
+                if (isFormula(word)) {
+                    span.classList.add('formula');
+                    span.textContent = word;
+                    output.appendChild(span);
+                    return;
+                }
+
+                /* звичайне слово: може стати пропуском ----------------------- */
+                if (indices.includes(idx)) {
+                    const ignorePunct = document.getElementById('ignorePunctuation').checked;
+                    const punct = ignorePunct ? getEndingPunctuation(word) : null;
+
+                    hiddenWords[idx] = punct ? word.slice(0, -1) : word;
+
+                    const input = document.createElement('input');
+                    input.className = 'blank';
+                    input.setAttribute('data-index', idx);
+                    span.appendChild(input);
+
+                    if (punct) span.appendChild(document.createTextNode(punct));
+                } else {
+                    span.textContent = word;
+                }
+                output.appendChild(span);
+            });
+
+            document.getElementById('result').textContent = '';
+
+            if (window.MathJax) {
+                MathJax.typesetPromise([output]);
+            }
+        }
+
+        function checkAnswers() {
+            const inputs = document.querySelectorAll('input.blank');
+            let correct = 0, total = inputs.length;
+
+            inputs.forEach(input => {
+                const idx = +input.dataset.index;
+                const expected = hiddenWords[idx];
+                const answer = input.value.trim();
+
+                if (answer === expected) {
+                    input.classList.add('correct');
+                    input.classList.remove('incorrect'); ++correct;
+                }
+                else {
+                    input.classList.add('incorrect');
+                    input.classList.remove('correct');
+                }
+            });
+            document.getElementById('result').textContent = `Richtig: ${correct}/${total}`;
+        }
+
+        /* ——— допоміжне для пунктуації ——— */
+        function endsWithPunctuation(w) { return /[.,!]$/.test(w); }
+        function getEndingPunctuation(w) { return endsWithPunctuation(w) ? w.slice(-1) : null; }
+    </script>
+</body>
+
+</html>
