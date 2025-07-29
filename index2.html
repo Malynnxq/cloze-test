@@ -1,18 +1,44 @@
 <!DOCTYPE html>
 <html lang="de">
+
 <head>
     <meta charset="UTF-8">
     <title>Cloze-Test Generator</title>
     <style>
-        body { font-family: sans-serif; margin: 2em; }
-        textarea { width: 100%; height: 150px; }
-        input[type='number'] { width: 60px; }
-        .word { display: inline-block; margin: 0 3px; }
-        .blank { width: 100px; padding: 2px; }
-        .correct { background-color: palegreen; }
-        .incorrect { background-color: lightcoral; }
+        body {
+            font-family: sans-serif;
+            margin: 2em;
+        }
+
+        textarea {
+            width: 100%;
+            height: 150px;
+        }
+
+        input[type='number'] {
+            width: 60px;
+        }
+
+        .word {
+            display: inline-block;
+            margin: 0 3px;
+        }
+
+        .blank {
+            width: 100px;
+            padding: 2px;
+        }
+
+        .correct {
+            background-color: palegreen;
+        }
+
+        .incorrect {
+            background-color: lightcoral;
+        }
     </style>
 </head>
+
 <body>
     <h1>Cloze-Test Generator</h1>
     <label for="textInput">Text eingeben:</label><br>
@@ -23,6 +49,7 @@
 
     <label for="stopwordsInput">Zusätzliche Stoppwörter (kommagetrennt):</label><br>
     <input type="text" id="stopwordsInput" placeholder="z. B.: der, die, das"><br><br>
+    <label><input type="checkbox" id="ignorePunctuation"> Don't check punctuation</label><br><br>
 
     <button onclick="generateCloze()">Lücken erstellen</button>
     <button onclick="checkAnswers()">Antworten prüfen</button>
@@ -73,11 +100,33 @@
                 span.classList.add('word');
 
                 if (indices.includes(idx)) {
-                    hiddenWords[idx] = word;
-                    const input = document.createElement('input');
-                    input.className = 'blank';
-                    input.setAttribute('data-index', idx);
-                    span.appendChild(input);
+                    const ignorePunctuation = document.getElementById('ignorePunctuation').checked;
+
+                    if (ignorePunctuation) {
+                        const punct = getEndingPunctuation(word);
+                        if (punct !== null) {
+                            hiddenWords[idx] = word.slice(0, -1);
+
+                            const input = document.createElement('input');
+                            input.className = 'blank';
+                            input.setAttribute('data-index', idx);
+
+                            span.appendChild(input);
+                            span.appendChild(document.createTextNode(punct));  // ← тут виправлено
+                        } else {
+                            hiddenWords[idx] = word;
+                            const input = document.createElement('input');
+                            input.className = 'blank';
+                            input.setAttribute('data-index', idx);
+                            span.appendChild(input);
+                        }
+                    } else {
+                        hiddenWords[idx] = word;
+                        const input = document.createElement('input');
+                        input.className = 'blank';
+                        input.setAttribute('data-index', idx);
+                        span.appendChild(input);
+                    }
                 } else {
                     span.textContent = word;
                 }
@@ -109,6 +158,19 @@
 
             document.getElementById('result').textContent = `Richtig: ${correct}/${total}`;
         }
+
+        function endsWithPunctuation(word) {
+            return /[.,!]$/.test(word);
+        }
+
+        function getEndingPunctuation(word) {
+            if (endsWithPunctuation(word)) {
+                return word[word.length - 1];
+            } else {
+                return null;
+            }
+        }
     </script>
 </body>
+
 </html>
