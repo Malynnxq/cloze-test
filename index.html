@@ -1,134 +1,307 @@
 <!DOCTYPE html>
 <html lang="de">
 <head>
-    <meta charset="UTF-8">
-    <title>Cloze-Test Generator</title>
-    <style>
-        body { font-family: sans-serif; margin: 2em; }
-        textarea { width: 100%; height: 150px; }
-        input[type='number'] { width: 60px; }
-        .word { display: inline-block; margin: 0 3px; }
-        .blank { width: 100px; padding: 2px; }
-        .correct { background-color: palegreen; }
-        .incorrect { background-color: lightcoral; }
-    </style>
+<meta charset="UTF-8">
+<title>Cloze-Test Generator</title>
+<style>
+  body               { font-family:sans-serif; margin:2em; }
+  textarea           { width:100%; height:150px; }
+  input[type=number] { width:60px; }
+  .word              { display:inline-block; margin:0 3px; }
+  .blank             { width:100px; padding:2px; }
+  .math-blank        { width:120px; padding:2px; margin:2px 0; }
+  .correct           { background:palegreen; }
+  .incorrect         { background:lightcoral; }
+  .formula           { white-space:nowrap; }
+  #mathInputs label  { display:block; margin:.2em 0; }
+  #examples button   { margin-right:.5rem; margin-top:.25rem; }
+</style>
+
+<!-- MathJax 3 (TeX → SVG) -->
+<script>
+window.MathJax = {
+  tex : { inlineMath : [["$","$"],["\\(","\\)"]],
+          displayMath: [["$$","$$"],["\\[","\\]"]] },
+  svg : { fontCache:'global' }
+};
+</script>
+<script defer src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-svg.js"></script>
 </head>
+
 <body>
-    <h1>Cloze-Test Generator</h1>
-    
-    <label for="textInput">Text eingeben:</label><br>
-    <textarea id="textInput"></textarea><br><br>
+<h1>Cloze-Test Generator</h1>
 
-    <label for="difficulty">Schwierigkeit (% Lücken): </label>
-    <input type="number" id="difficulty" value="20" min="0" max="100"><br><br>
+<label for="textInput">Text eingeben:</label><br>
+<textarea id="textInput"></textarea><br><br>
 
-    <label for="stopwordsInput">Zusätzliche Stoppwörter (kommagetrennt):</label><br>
-    <input type="text" id="stopwordsInput" placeholder="z. B.: der, die, das"><br><br>
+<label for="difficulty">Schwierigkeit (% Lücken): </label>
+<input type="number" id="difficulty" value="20" min="0" max="100"><br><br>
 
-    <!-- NEU: Checkbox zur optionalen Trennung von Satzzeichen -->
-    <label><input type="checkbox" id="separateSyntax"> Syntax testen (Leerzeichen vor Satzzeichen)</label><br><br>
+<label for="stopwordsInput">Zusätzliche Stoppwörter (kommagetrennt):</label><br>
+<input type="text" id="stopwordsInput" placeholder="z. B.: der, die, das"><br><br>
 
-    <button onclick="generateCloze()">Lücken erstellen</button>
-    <button onclick="checkAnswers()">Antworten prüfen</button>
+<label><input type="checkbox" id="ignorePunctuation"> Don't check punctuation</label><br>
+<label><input type="checkbox" id="processMath"> Перевіряти математичну нотацію</label><br>
+<label><input type="checkbox" id="noHideMathCommands"> Don't hide commands in math</label><br><br>
 
-    <p id="result"></p>
-    <div id="output" style="margin-top: 1em;"></div>
+<button id="btnGen">Lücken erstellen</button>
+<button id="btnCheck">Antworten prüfen</button>
 
-    <script>
-        let hiddenWords = {};
+<p id="result"></p>
+<div id="output" style="margin-top:1em;"></div>
 
-        // NEU: Satzzeichen mit Leerzeichen vom Wort trennen
-        function separatePunctuation(text) {
-            return text
-                .replace(/([.,!?;:()])/g, ' $1')  // Leerzeichen vor Satzzeichen
-                .replace(/\s+/g, ' ')             // doppelte Leerzeichen reduzieren
-                .trim();                          // äußere Leerzeichen entfernen
+<h3 id="mathHeader" style="display:none;">Математичні відповіді</h3>
+<div id="mathInputs"></div>
+
+<hr>
+<div id="examples">
+  <h3>Beispiele laden</h3>
+  <button onclick="loadExample(1)">Beispiel 1 — Inline‑Formeln</button>
+  <button onclick="loadExample(2)">Beispiel 2 — Display‑Formeln</button>
+  <button onclick="loadExample(3)">Beispiel 3 — Gemischt</button>
+  <button onclick="loadExample(4)">Beispiel 4 — Stückweise/Integral</button>
+  <button onclick="loadExample(5)">Beispiel 5 — Matrix/Vektoren</button>
+  <button onclick="loadExample(6)">Beispiel 6 — Akzente/Vektor</button>
+</div>
+
+<script>
+/* -------------------------------------------------- */
+/* helpers                                            */
+/* -------------------------------------------------- */
+const isFormula = t => typeof t === 'string' && t.startsWith('$');
+function splitIntoTextAndFormula(str){
+  const re = /(\$\$[^$]*?\$\$|\$[^$]*?\$)/g; // conservative split
+  const out = [];
+  let last = 0, match;
+  while ((match = re.exec(str)) !== null) {
+    if (match.index > last)
+      out.push(...str.slice(last, match.index).split(/\s+/).filter(Boolean));
+    out.push(match[0]);
+    last = re.lastIndex;
+  }
+  if (last < str.length)
+    out.push(...str.slice(last).split(/\s+/).filter(Boolean));
+  return out;
+}
+const endsWithP = w => (typeof w === 'string') && /[.,!?;:()\[\]"'»«]$/.test(w);
+const endPunct  = w => endsWithP(w) ? w.slice(-1) : null;
+
+/* команди, які не чіпаємо */
+const RESERVED = new Set([
+  '\\frac','\\sqrt','\\sum','\\int','\\log','\\sin','\\cos','\\tan',
+  '\\left','\\right','\\big','\\Big','\\bigl','\\bigr','\\Bigl','\\Bigr',
+  '\\begin','\\end','\\bmatrix','\\pmatrix','\\vmatrix','\\cases',
+  '\\text','\\mathbb','\\mathrm','\\operatorname','\\vec',
+  '&', '\\\\'
+]);
+
+/* -------------------------------------------------- */
+/* globals                                            */
+/* -------------------------------------------------- */
+let hidden={}, counter=0;
+
+/* Placeholder: number + underline both red; special handling for accents */
+function makePlaceholder(idx, original, prevLex){
+  const src = String(original || '');
+  const isCmd = /^\\[A-Za-z]+$/.test(src);
+  // Safe phantom width: commands -> 'MMM'; non‑alnum -> 'M' to avoid brace/command bleed
+  let phantomArg = isCmd ? 'MMM' : src;
+  if(!/^[A-Za-z0-9]+$/.test(phantomArg)) phantomArg = 'M';
+
+  const ACCENTS = new Set(['\\vec','\\hat','\\bar','\\tilde','\\overline','\\overrightarrow','\\overleftarrow','\\widehat','\\widetilde']);
+  const isAccent = ACCENTS.has(String(prevLex||''));
+
+  if(isAccent){
+    // Keep natural height so the accent sits higher and does not overlap; color both label and underline
+    const inner = `\\textcolor{red}{(${idx})\\,\\underline{\\hphantom{${phantomArg}}}}\\vphantom{M}`;
+    return `{${inner}}`;
+  }
+
+  // Default: color BOTH the label and underline red, always grouped
+  const inner = `\\textcolor{red}{(${idx})\\;\\underline{\\hphantom{${phantomArg}}}}`;
+  return `{${inner}}`;
+}
+
+/* -------------------------------------------------- */
+/* main                                               */
+/* -------------------------------------------------- */
+function generateCloze(){
+  const raw = document.getElementById('textInput').value.trim();
+  if(!raw) return;
+
+  const percent = +document.getElementById('difficulty').value;
+  const ignoreP = document.getElementById('ignorePunctuation').checked;
+  const mathOn  = document.getElementById('processMath').checked;
+  const noHideCmds = document.getElementById('noHideMathCommands').checked;
+
+  /* стоп‑слова */
+  const stop = new Set([
+    'der','die','das','ein','eine','und','oder','aber','nicht','ist',
+    'war','wird','auch','so','in','im','am','an',
+    ...document.getElementById('stopwordsInput').value
+      .split(',').map(s=>s.trim().toLowerCase()).filter(Boolean)
+  ]);
+
+  /* очистка старого виводу */
+  hidden={}; counter=0;
+  const out  = document.getElementById('output');      out.innerHTML='';
+  const mBox = document.getElementById('mathInputs');  mBox.innerHTML='';
+  document.getElementById('mathHeader').style.display='none';
+  document.getElementById('result').textContent='';
+
+  const tokens = splitIntoTextAndFormula(raw);
+
+  /* ---------------- текстові пропуски (БЕЗ порожніх) ----------- */
+  const textHideable = tokens
+    .map((t,i)=>{
+      if(isFormula(t)) return null;
+      const tStr = String(t ?? '');
+      const clean = tStr.replace(/[.,!?;:()\[\]"'»«]+$/,'');
+      if(!clean) return null;
+      if(stop.has(clean.toLowerCase())) return null;
+      return i;
+    })
+    .filter(i=>i!==null);
+
+  const maxTextBlanks = Math.max(1, Math.round(textHideable.length*percent/100));
+  const chosenText = new Set();
+  while(chosenText.size < maxTextBlanks && textHideable.length){
+    chosenText.add(textHideable.splice(Math.random()*textHideable.length|0,1)[0]);
+  }
+
+  /* -------------- обхід усіх токенів ---------------- */
+  tokens.forEach((tok,i)=>{
+    const tokStr = String(tok ?? '');
+    /* === FORMULA === */
+    if(isFormula(tokStr)){
+      const span = document.createElement('span');
+      span.className = 'word formula';
+
+      if(!mathOn){ span.textContent = tokStr; out.appendChild(span); return; }
+
+      const delim = tokStr.startsWith('$$') ? '$$' : '$';
+      const core  = tokStr.slice(delim.length,-delim.length);
+
+      /* лексеми усередині формули */
+      const lex = core.match(
+        /(\\\\|\\[a-zA-Z]+|\\\{|\\\}|[a-zA-Z]+|\d+|[=+\-*/^_:&]|[{}\[\]()]|\\,|\\;|\\!|,|\.|\\%|!|')/g
+      ) || [core];
+
+      /* відфільтровуємо, що можна ховати */
+      const hideable = lex
+        .map((lx,k)=>{
+          const cmd=/^\\[a-zA-Z]+$/.test(lx);
+          const ok = (
+            (cmd && !RESERVED.has(lx) && lx.length<=16 && !noHideCmds) ||
+            (!cmd && /^[a-zA-Z]$/.test(lx)) ||
+            (!cmd && /^\d+$/.test(lx))
+          );
+          return ok ? k : null;
+        }).filter(x=>x!==null);
+
+      const maxFormBlanks = Math.round(hideable.length*percent/100);
+      const chosenForm = new Set();
+      while(chosenForm.size < maxFormBlanks && hideable.length){
+        chosenForm.add(hideable.splice(Math.random()*hideable.length|0,1)[0]);
+      }
+
+      /* збираємо формулу із плейс‑холдерами */
+      const rebuilt=[];
+      lex.forEach((lx,k)=>{
+        if(chosenForm.has(k)){
+          ++counter; hidden[counter]=lx;
+          const prev = lex[k-1]||'';
+          rebuilt.push(makePlaceholder(counter,lx,prev));
+
+          /* input під текстом */
+          const lab=document.createElement('label');
+          lab.innerHTML=`(${counter}) <input class="blank math-blank" data-index="${counter}">`;
+          mBox.appendChild(lab);
+          document.getElementById('mathHeader').style.display='block';
+        }else{
+          rebuilt.push(lx);
         }
+      });
 
-        function generateCloze() {
-            let text = document.getElementById('textInput').value.trim();
-            const percent = parseInt(document.getElementById('difficulty').value);
-            const doSeparateSyntax = document.getElementById('separateSyntax').checked;
-            const customStopwords = document.getElementById('stopwordsInput').value
-                .split(',')
-                .map(w => w.trim().toLowerCase())
-                .filter(w => w);
-
-            const stopwords = new Set([
-                "der", "die", "das", "ein", "eine", "und", "oder", "aber",
-                "nicht", "ist", "war", "wird", "auch", "so", "in", "im", "am", "an",
-                "-", "–", "—", ",", ".", "!", "?", "---", "--", "",
-                ...customStopwords
-            ]);
-
-            if (!text) return;
-
-            // Wenn Checkbox gesetzt ist → Text vorbereiten
-            if (doSeparateSyntax) {
-                text = separatePunctuation(text);
-            }
-
-            const words = text.split(/\s+/);
-            const total = words.length;
-            const numBlanks = Math.max(1, Math.round((percent / 100) * total));
-
-            const indices = [];
-            let attempts = 0;
-            while (indices.length < numBlanks && attempts < 1000) {
-                const idx = Math.floor(Math.random() * total);
-                const cleanWord = words[idx].replace(/[.,!?;:()]/g, '').toLowerCase();
-                if (!stopwords.has(cleanWord) && !indices.includes(idx)) {
-                    indices.push(idx);
-                }
-                attempts++;
-            }
-
-            hiddenWords = {};
-            const output = document.getElementById('output');
-            output.innerHTML = '';
-
-            words.forEach((word, idx) => {
-                const span = document.createElement('span');
-                span.classList.add('word');
-
-                if (indices.includes(idx)) {
-                    hiddenWords[idx] = word;
-                    const input = document.createElement('input');
-                    input.className = 'blank';
-                    input.setAttribute('data-index', idx);
-                    span.appendChild(input);
-                } else {
-                    span.textContent = word;
-                }
-
-                output.appendChild(span);
-            });
-
-            document.getElementById('result').textContent = '';
+      /* --- Додаємо ПРОБІЛ після \cmd перед літерами --------------- */
+      let formulaStr='';
+      rebuilt.forEach((part,k)=>{
+        if(k>0){
+          const prev=rebuilt[k-1];
+          const needSpace=/^\\[a-zA-Z]+$/.test(prev) && /^[A-Za-z]/.test(part) && !part.startsWith('\\');
+          if(needSpace) formulaStr+=' ';
         }
+        formulaStr+=part;
+      });
 
-        function checkAnswers() {
-            let correct = 0;
-            let total = Object.keys(hiddenWords).length;
-            const inputs = document.querySelectorAll('input.blank');
+      span.textContent = delim + formulaStr + delim;
+      out.appendChild(span);
+      return;
+    }
 
-            inputs.forEach(input => {
-                const idx = parseInt(input.getAttribute('data-index'));
-                const expected = hiddenWords[idx];
-                const answer = input.value.trim();
+    /* === ЗВИЧАЙНЕ СЛОВО === */
+    const span = document.createElement('span'); span.className='word';
+    if(chosenText.has(i)){
+      ++counter;
+      const punct = ignoreP ? endPunct(tokStr) : null;
+      const cleanTok = (punct ? (tokStr ? tokStr.slice(0,-1) : '') : tokStr);
+      if(cleanTok.length===0){ span.textContent=tokStr; out.appendChild(span); return; }
 
-                if (answer === expected) {
-                    input.classList.add('correct');
-                    input.classList.remove('incorrect');
-                    correct++;
-                } else {
-                    input.classList.add('incorrect');
-                    input.classList.remove('correct');
-                }
-            });
+      hidden[counter]=cleanTok;
+      const inp=document.createElement('input');
+      inp.className='blank'; inp.dataset.index=counter;
+      span.appendChild(inp);
+      if(punct) span.appendChild(document.createTextNode(punct));
+    }else{ span.textContent=tokStr; }
+    out.appendChild(span);
+  });
 
-            document.getElementById('result').textContent = `Richtig: ${correct}/${total}`;
-        }
-    </script>
+  /* MathJax рендер */
+  if(window.MathJax) MathJax.typesetPromise([out]);
+}
+
+/* -------------------------------------------------- */
+/* checking                                           */
+/* -------------------------------------------------- */
+function checkAnswers(){
+  const inputs=document.querySelectorAll('input.blank');
+  let ok=0,total=inputs.length;
+  inputs.forEach(inp=>{
+    const id=+inp.dataset.index;
+    if((inp.value || '').trim()===hidden[id]){
+      inp.classList.add('correct');   inp.classList.remove('incorrect'); ++ok;
+    }else{
+      inp.classList.add('incorrect'); inp.classList.remove('correct');
+    }
+  });
+  document.getElementById('result').textContent=`Richtig: ${ok}/${total}`;
+}
+
+/* -------------------------------------------------- */
+/* examples                                           */
+/* -------------------------------------------------- */
+// Expose loader globally so inline onclick works even if parsing order differs
+window.loadExample = function(n){
+  let txt = '';
+  if(n===1){
+    txt = "Heute lernen wir Reihen und Physik. Die berühmte Formel lautet $E=mc^2$. Außerdem gilt die Summe $\\sum_{i=1}^{n} i = \\frac{n(n+1)}{2}$. Das Zeichen $\\pi$ ist eine Konstante, und $a_n = r^n$ beschreibt eine geometrische Folge.";
+  } else if(n===2){
+    txt = "Die Dichte der Standardnormalverteilung ist:\n$$f(x)=\\frac{1}{\\sqrt{2\\pi}} \\exp\\!\\left(-\\tfrac{x^2}{2}\\right)$$\nWeiter haben wir das Integral $\\int_0^1 x^2 \\, dx = \\tfrac{1}{3}$.";
+  } else if(n===3){
+    txt = "Gemischter Test: In der Kombinatorik ist $n! = n\\cdot(n-1)\\cdot\\ldots\\cdot 1$. Für Folgen schreiben wir $x_{n+1}=x_n+1$. Außerdem: $$S_n = \\sum_{k=0}^{n} q^k = \\frac{1-q^{n+1}}{1-q}$$ und $\\lim_{x \\to \\infty} \\frac{1}{x} = 0$.";
+  } else if(n===4){
+    txt = "Die Funktion $g(x)=\\begin{cases} x^2,& x\\ge0\\\\ -x,& x<0\\end{cases}$. Außerdem $\\int_0^1 x^2\\,dx=\\tfrac{1}{3}$.";
+  } else if(n===5){
+    txt = "$A=\\begin{pmatrix}1&2\\\\3&4\\end{pmatrix}$, $\\vec v=(v_1,v_2)$, und $A\\vec v=\\begin{pmatrix}v_1+2v_2\\\\3v_1+4v_2\\end{pmatrix}$.";
+  } else if(n===6){
+    txt = "$A=\\begin{pmatrix}1&2\\\\3&4\\end{pmatrix}$, $\\vec v=(v_1,v_2)$, und $A\\vec v=\\begin{pmatrix}v_1+2v_{(4)}\\\\3v_1+4v_{(5)}\\end{pmatrix}$.";
+  }
+  document.getElementById('textInput').value = txt;
+};
+
+/* UI bindings */
+document.getElementById('btnGen').addEventListener('click', generateCloze);
+document.getElementById('btnCheck').addEventListener('click', checkAnswers);
+</script>
 </body>
 </html>

@@ -1,0 +1,471 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<title>Cloze-Test Generator</title>
+<style>
+  body               { font-family:sans-serif; margin:2em; }
+  textarea           { width:100%; height:150px; }
+  input[type=number] { width:60px; }
+  .word              { display:inline-block; margin:0 3px; }
+  .blank             { width:100px; padding:2px; }
+  .math-blank        { width:120px; padding:2px; margin:2px 0; }
+  .correct           { background:palegreen; }
+  .incorrect         { background:lightcoral; }
+  .formula           { white-space:nowrap; }
+  #mathInputs label  { display:block; margin:.2em 0; }
+  #examples button   { margin-right:.5rem; margin-top:.25rem; }
+  #promptBox         { width:100%; height:180px; }
+  .muted             { color:#666; font-size:.9em; }
+  .row               { display:flex; gap:.5rem; align-items:center; flex-wrap:wrap; }
+  .row > *           { margin-top:.25rem; }
+</style>
+
+<!-- MathJax 3 (TeX → SVG) -->
+<script>
+window.MathJax = {
+  tex : { inlineMath : [["$","$"],["\\(","\\)"]],
+          displayMath: [["$$","$$"],["\\[","\\]"]] },
+  svg : { fontCache:'global' }
+};
+</script>
+<script defer src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-svg.js"></script>
+</head>
+
+<body>
+<h1>Cloze-Test Generator</h1>
+
+<label for="textInput">Text eingeben:</label><br>
+<textarea id="textInput"></textarea><br><br>
+
+<label for="difficulty">Schwierigkeit (% Lücken): </label>
+<input type="number" id="difficulty" value="20" min="0" max="100"><br><br>
+
+<label for="stopwordsInput">Zusätzliche Stoppwörter (kommagetrennt):</label><br>
+<input type="text" id="stopwordsInput" placeholder="z. B.: der, die, das"><br><br>
+
+<label><input type="checkbox" id="ignorePunctuation"> Don't check punctuation</label><br>
+<label><input type="checkbox" id="processMath"> Перевіряти математичну нотацію</label><br>
+<label><input type="checkbox" id="noHideMathCommands"> Don't hide commands in math</label><br><br>
+
+<button id="btnGen">Lücken erstellen</button>
+<button id="btnCheck">Antworten prüfen</button>
+
+<p id="result"></p>
+<div id="output" style="margin-top:1em;"></div>
+
+<h3 id="mathHeader" style="display:none;">Математичні відповіді</h3>
+<div id="mathInputs"></div>
+
+<hr>
+<div id="examples">
+  <h3>Beispiele laden</h3>
+  <button onclick="loadExample(1)">Beispiel 1 — Inline‑Formeln</button>
+  <button onclick="loadExample(2)">Beispiel 2 — Display‑Formeln</button>
+  <button onclick="loadExample(3)">Beispiel 3 — Gemischt</button>
+  <button onclick="loadExample(4)">Beispiel 4 — Stückweise/Integral</button>
+  <button onclick="loadExample(5)">Beispiel 5 — Matrix/Vektoren</button>
+  <button onclick="loadExample(6)">Beispiel 6 — Akzente/Vektor</button>
+</div>
+
+<hr>
+<h3>Prompts für ChatGPT</h3>
+<div class="row">
+  <button id="btnPromptRephrase">Prompt: Reformulieren</button>
+  <button id="btnPromptReal">Prompt: Real‑Life‑Rewrite</button>
+</div>
+<div class="row">
+  <label for="hintGap">Lücken‑Nr. für Hinweis:</label>
+  <input type="number" id="hintGap" min="1" style="width:80px;">
+  <button id="btnPromptHint">Prompt: Hinweis zu Lücke</button>
+</div>
+<textarea id="promptBox" readonly placeholder="Hier erscheinen die generierten Prompts für ChatGPT…"></textarea>
+<div class="row">
+  <button id="btnCopyPrompt">In Zwischenablage kopieren</button>
+  <span class="muted">Tipp: Prompt kopieren und in einem neuen Chat einfügen.</span>
+</div>
+
+<script>
+/* -------------------------------------------------- */
+/* helpers                                            */
+/* -------------------------------------------------- */
+const isFormula = t => typeof t === 'string' && t.startsWith('$');
+function splitIntoTextAndFormula(str){
+  const re = /(\$\$[^$]*?\$\$|\$[^$]*?\$)/g; // conservative split
+  const out = [];
+  let last = 0, match;
+  while ((match = re.exec(str)) !== null) {
+    if (match.index > last)
+      out.push(...str.slice(last, match.index).split(/\s+/).filter(Boolean));
+    out.push(match[0]);
+    last = re.lastIndex;
+  }
+  if (last < str.length)
+    out.push(...str.slice(last).split(/\s+/).filter(Boolean));
+  return out;
+}
+const endsWithP = w => (typeof w === 'string') && /[.,!?;:()\[]"'»«]$/.test(w);
+const endPunct  = w => endsWithP(w) ? w.slice(-1) : null;
+
+/* Base64 (UTF‑8‑sicher) */
+function toBase64Unicode(str){
+  const enc = new TextEncoder().encode(str);
+  let bin = '';
+  for (let i=0;i<enc.length;i++) bin += String.fromCharCode(enc[i]);
+  return btoa(bin);
+}
+
+/* kommandos, die wir nicht verstecken */
+const RESERVED = new Set([
+  '\\frac','\\sqrt','\\sum','\\int','\\log','\\sin','\\cos','\\tan',
+  '\\left','\\right','\\big','\\Big','\\bigl','\\bigr','\\Bigl','\\Bigr',
+  '\\begin','\\end','\\bmatrix','\\pmatrix','\\vmatrix','\\cases',
+  '\\text','\\mathbb','\\mathrm','\\operatorname','\\vec',
+  '&', '\\\\'
+]);
+
+/* -------------------------------------------------- */
+/* globals                                            */
+/* -------------------------------------------------- */
+let hidden={}, counter=0;
+let gapMap={};           // { idx: {kind:'text'|'math', tokenIndex, origTokStr?, formula:{delim, core, lexIndex}} }
+let lastTokens=[];       // tokens of last generation
+let lastRaw='';          // original raw text used for generation
+
+/* Placeholder: number + underline both red; special handling for accents */
+function makePlaceholder(idx, original, prevLex){
+  const src = String(original || '');
+  const isCmd = /^\\[A-Za-z]+$/.test(src);
+  // Safe phantom width
+  let phantomArg = isCmd ? 'MMM' : src;
+  if(!/^[A-Za-z0-9]+$/.test(phantomArg)) phantomArg = 'M';
+
+  const ACCENTS = new Set(['\\vec','\\hat','\\bar','\\tilde','\\overline','\\overrightarrow','\\overleftarrow','\\widehat','\\widetilde']);
+  const isAccent = ACCENTS.has(String(prevLex||''));
+
+  if(isAccent){
+    const inner = `\\textcolor{red}{(${idx})\\,\\underline{\\hphantom{${phantomArg}}}}\\vphantom{M}`;
+    return `{${inner}}`;
+  }
+  const inner = `\\textcolor{red}{(${idx})\\;\\underline{\\hphantom{${phantomArg}}}}`;
+  return `{${inner}}`;
+}
+
+/* rebuild formula string with extra spacing after commands before letters (like generation) */
+function rebuildFormulaFromLex(rebuilt){
+  let s='';
+  for(let k=0;k<rebuilt.length;k++){
+    if(k>0){
+      const prev=rebuilt[k-1];
+      const needSpace=/^\\\\[a-zA-Z]+$/.test(prev) && /^[A-Za-z]/.test(rebuilt[k]) && !rebuilt[k].startsWith('\\');
+      if(needSpace) s+=' ';
+    }
+    s+=rebuilt[k];
+  }
+  return s;
+}
+
+/* reconstruct full text string from tokens */
+function tokensToString(tokens){
+  return tokens.join(' ');
+}
+
+/* Context snippet around a token index */
+function contextWindow(tokens, i, radius=12){
+  const a=Math.max(0,i-radius), b=Math.min(tokens.length,i+radius+1);
+  return tokens.slice(a,b).join(' ');
+}
+
+/* -------------------------------------------------- */
+/* main                                               */
+/* -------------------------------------------------- */
+function generateCloze(){
+  const raw = document.getElementById('textInput').value.trim();
+  if(!raw) return;
+
+  const percent = +document.getElementById('difficulty').value;
+  const ignoreP = document.getElementById('ignorePunctuation').checked;
+  const mathOn  = document.getElementById('processMath').checked;
+  const noHideCmds = document.getElementById('noHideMathCommands').checked;
+
+  /* stop‑words */
+  const stop = new Set([
+    'der','die','das','ein','eine','und','oder','aber','nicht','ist',
+    'war','wird','auch','so','in','im','am','an',
+    ...document.getElementById('stopwordsInput').value
+      .split(',').map(s=>s.trim().toLowerCase()).filter(Boolean)
+  ]);
+
+  /* clear old output */
+  hidden={}; counter=0; gapMap={};
+  const out  = document.getElementById('output');      out.innerHTML='';
+  const mBox = document.getElementById('mathInputs');  mBox.innerHTML='';
+  document.getElementById('mathHeader').style.display='none';
+  document.getElementById('result').textContent='';
+
+  const tokens = splitIntoTextAndFormula(raw);
+  lastTokens = tokens.slice();
+  lastRaw = raw;
+
+  /* ---- text blanks (non‑empty) ---- */
+  const textHideable = tokens
+    .map((t,i)=>{
+      if(isFormula(t)) return null;
+      const tStr = String(t ?? '');
+      const clean = tStr.replace(/[.,!?;:()\[]"'»«]+$/,'');
+      if(!clean) return null;
+      if(stop.has(clean.toLowerCase())) return null;
+      return i;
+    })
+    .filter(i=>i!==null);
+
+  const maxTextBlanks = Math.max(1, Math.round(textHideable.length*percent/100));
+  const chosenText = new Set();
+  while(chosenText.size < maxTextBlanks && textHideable.length){
+    chosenText.add(textHideable.splice(Math.random()*textHideable.length|0,1)[0]);
+  }
+
+  /* ---- iterate tokens ---- */
+  tokens.forEach((tok,i)=>{
+    const tokStr = String(tok ?? '');
+    /* FORMULA */
+    if(isFormula(tokStr)){
+      const span = document.createElement('span');
+      span.className = 'word formula';
+
+      if(!mathOn){ span.textContent = tokStr; out.appendChild(span); return; }
+
+      const delim = tokStr.startsWith('$$') ? '$$' : '$';
+      const core  = tokStr.slice(delim.length,-delim.length);
+
+      /* lex inside formula */
+      const lex = core.match(
+        /(\\\\|\\[a-zA-Z]+|\\\{|\\\}|[a-zA-Z]+|\d+|[=+\-*/^_:&]|[{}\[\]()]|\\,|\\;|\\!|,|\.|\\%|!|')/g
+      ) || [core];
+
+      const hideable = lex
+        .map((lx,k)=>{
+          const cmd=/^\\[a-zA-Z]+$/.test(lx);
+          const ok = (
+            (cmd && !RESERVED.has(lx) && lx.length<=16 && !noHideCmds) ||
+            (!cmd && /^[a-zA-Z]$/.test(lx)) ||
+            (!cmd && /^\d+$/.test(lx))
+          );
+          return ok ? k : null;
+        }).filter(x=>x!==null);
+
+      const maxFormBlanks = Math.round(hideable.length*percent/100);
+      const chosenForm = new Set();
+      while(chosenForm.size < maxFormBlanks && hideable.length){
+        chosenForm.add(hideable.splice(Math.random()*hideable.length|0,1)[0]);
+      }
+
+      /* build formula with placeholders */
+      const rebuilt=[];
+      lex.forEach((lx,k)=>{
+        if(chosenForm.has(k)){
+          ++counter; hidden[counter]=lx;
+          const prev = lex[k-1]||'';
+          rebuilt.push(makePlaceholder(counter,lx,prev));
+
+          /* input below */
+          const lab=document.createElement('label');
+          lab.innerHTML=`(${counter}) <input class="blank math-blank" data-index="${counter}">`;
+          mBox.appendChild(lab);
+          document.getElementById('mathHeader').style.display='block';
+
+          /* map */
+          gapMap[counter] = { kind:'math', tokenIndex:i, formula:{ delim, core, lexIndex:k } };
+        }else{
+          rebuilt.push(lx);
+        }
+      });
+
+      const formulaStr = rebuildFormulaFromLex(rebuilt);
+      span.textContent = delim + formulaStr + delim;
+      out.appendChild(span);
+      return;
+    }
+
+    /* TEXT WORD */
+    const span = document.createElement('span'); span.className='word';
+    if(chosenText.has(i)){
+      ++counter;
+      const punct = document.getElementById('ignorePunctuation').checked ? endPunct(tokStr) : null;
+      const cleanTok = (punct ? (tokStr ? tokStr.slice(0,-1) : '') : tokStr);
+      if(cleanTok.length===0){ span.textContent=tokStr; out.appendChild(span); return; }
+
+      hidden[counter]=cleanTok;
+      const inp=document.createElement('input');
+      inp.className='blank'; inp.dataset.index=counter;
+      span.appendChild(inp);
+      if(punct) span.appendChild(document.createTextNode(punct));
+
+      gapMap[counter] = { kind:'text', tokenIndex:i, origTokStr: tokStr };
+    }else{ span.textContent=tokStr; }
+    out.appendChild(span);
+  });
+
+  if(window.MathJax) MathJax.typesetPromise([out]);
+}
+
+/* -------------------------------------------------- */
+/* checking                                           */
+/* -------------------------------------------------- */
+function checkAnswers(){
+  const inputs=document.querySelectorAll('input.blank');
+  let ok=0,total=inputs.length;
+  inputs.forEach(inp=>{
+    const id=+inp.dataset.index;
+    if((inp.value || '').trim()===hidden[id]){
+      inp.classList.add('correct');   inp.classList.remove('incorrect'); ++ok;
+    }else{
+      inp.classList.add('incorrect'); inp.classList.remove('correct');
+    }
+  });
+  document.getElementById('result').textContent=`Richtig: ${ok}/${total}`;
+}
+
+/* -------------------------------------------------- */
+/* Prompt builders                                    */
+/* -------------------------------------------------- */
+function buildRephrasePrompt(){
+  const text = document.getElementById('textInput').value.trim();
+  if(!text){ alert('Bitte zuerst einen Text eingeben.'); return ''; }
+  return (
+`You are an expert writer and editor. Reformulate the following text in the SAME LANGUAGE as given, improving clarity and flow while preserving meaning. Keep length within ±10%.
+
+Important:
+- Preserve any LaTeX math between $...$ or $$...$$ verbatim (do not alter commands or spacing inside math).
+- Keep terminology precise. Do not introduce new facts.
+- Maintain paragraph structure when possible.
+
+TEXT:
+<<<BEGIN_TEXT
+${text}
+END_TEXT>>>`
+  );
+}
+
+function buildRealLifePrompt(){
+  const text = document.getElementById('textInput').value.trim();
+  if(!text){ alert('Bitte zuerst einen Text eingeben.'); return ''; }
+  return (
+`You are a knowledgeable educator and fact‑driven storyteller. Using the base text below, write a NEW version that is more connected to real life: include vivid, concrete examples, brief true historical notes, or surprising (but accurate) facts that make the topic engaging.
+
+Rules:
+- STRICTLY AVOID INVENTION. Only include facts that are widely accepted or easily verifiable. If you are not certain, omit the claim or mark it as uncertain.
+- If browsing is available, quickly verify any specific numbers before using them; otherwise, prefer qualitative facts over precise stats.
+- Keep the core ideas of the original, but you may reorder for narrative flow.
+- Preserve any LaTeX math between $...$ or $$...$$ verbatim.
+- Keep it concise and punchy. Aim for 2–5 short paragraphs plus one bullet list of 3–5 real‑world examples.
+- Optionally suggest 2–3 reputable sources for further reading.
+
+BASE TEXT:
+<<<BEGIN_TEXT
+${text}
+END_TEXT>>>`
+  );
+}
+
+function buildHintPrompt(){
+  const gap = +document.getElementById('hintGap').value;
+  if(!gap || !hidden[gap]){ alert('Bitte eine existierende Lücken‑Nummer angeben (nach dem Erstellen der Lücken).'); return ''; }
+  const meta = gapMap[gap];
+  if(!meta){ alert('Für diese Lücke liegen keine Metadaten vor. Erstelle die Lücken erneut.'); return ''; }
+
+  let maskedTokens = lastTokens.slice();
+  let localContext = '';
+
+  if(meta.kind === 'text'){
+    maskedTokens[meta.tokenIndex] = '█';
+    localContext = contextWindow(maskedTokens, meta.tokenIndex);
+  } else if(meta.kind === 'math'){
+    // reconstruct formula with the target lex replaced by a visible blank
+    const {delim, core, lexIndex} = meta.formula;
+    const lex = core.match(/(\\\\|\\[a-zA-Z]+|\\\{|\\\}|[a-zA-Z]+|\d+|[=+\-*/^_:&]|[{}\[\]()]|\\,|\\;|\\!|,|\.|\\%|!|')/g) || [core];
+    lex[lexIndex] = '____';
+    const rebuilt = rebuildFormulaFromLex(lex);
+    maskedTokens[meta.tokenIndex] = delim + rebuilt + delim;
+    localContext = tokensToString(maskedTokens);
+  }
+
+  const maskedText = tokensToString(maskedTokens);
+  const answerB64 = toBase64Unicode(hidden[gap]);
+
+  return (
+`You are a helpful tutor. I am solving a cloze (fill‑in‑the‑blank) exercise. Give me HINTS for the requested gap—do NOT reveal the exact answer.
+
+Instructions:
+- Decode TARGET_B64 as Base64 (UTF‑8) to know the target word/symbol, but do NOT print it or any substring of it. Do not show the first/last letter. Do not use rhymes that expose it.
+- Use the full context to craft a topic‑aware, instructive hint.
+- Provide 2–3 progressively stronger hints. The last hint may include a short example sentence where the blank fits, but keep the blank as “_____”.
+- If the target is LaTeX/math (command, variable, or number), explain the concept and how it functions in the given formula, without printing the decoded token.
+
+GAP_NUMBER: ${gap}
+TARGET_B64: ${answerB64}
+
+FULL TEXT WITH ONE MASKED SPOT:
+<<<BEGIN_TEXT
+${maskedText}
+END_TEXT>>>
+
+LOCAL CONTEXT SNIPPET AROUND THE GAP:
+${localContext}`
+  );
+}
+
+/* -------------------------------------------------- */
+/* examples                                           */
+/* -------------------------------------------------- */
+window.loadExample = function(n){
+  let txt = '';
+  if(n===1){
+    txt = "Heute lernen wir Reihen und Physik. Die berühmte Formel lautet $E=mc^2$. Außerdem gilt die Summe \\n$\\sum_{i=1}^{n} i = \\frac{n(n+1)}{2}$. Das Zeichen $\\pi$ ist eine Konstante, und $a_n = r^n$ beschreibt eine geometrische Folge.";
+  } else if(n===2){
+    txt = "Die Dichte der Standardnormalverteilung ist:\n$$f(x)=\\frac{1}{\\sqrt{2\\pi}} \\exp\\!\\left(-\\tfrac{x^2}{2}\\right)$$\nWeiter haben wir das Integral $\\int_0^1 x^2 \\, dx = \\tfrac{1}{3}$.";
+  } else if(n===3){
+    txt = "Gemischter Test: In der Kombinatorik ist $n! = n\\cdot(n-1)\\cdot\\ldots\\cdot 1$. Für Folgen schreiben wir $x_{n+1}=x_n+1$. Außerdem: $$S_n = \\sum_{k=0}^{n} q^k = \\frac{1-q^{n+1}}{1-q}$$ und $\\lim_{x \\to \\infty} \\frac{1}{x} = 0$.";
+  } else if(n===4){
+    txt = "Die Funktion $g(x)=\\begin{cases} x^2,& x\\ge0\\\\ -x,& x<0\\end{cases}$. Außerdem $\\int_0^1 x^2\\,dx=\\tfrac{1}{3}$.";
+  } else if(n===5){
+    txt = "$A=\\begin{pmatrix}1&2\\\\3&4\\end{pmatrix}$, $\\vec v=(v_1,v_2)$, und $A\\vec v=\\begin{pmatrix}v_1+2v_2\\\\3v_1+4v_2\\end{pmatrix}$.";
+  } else if(n===6){
+    txt = "$A=\\begin{pmatrix}1&2\\\\3&4\\end{pmatrix}$, $\\vec v=(v_1,v_2)$, und $A\\vec v=\\begin{pmatrix}v_1+2v_{(4)}\\\\3v_1+4v_{(5)}\\end{pmatrix}$.";
+  }
+  document.getElementById('textInput').value = txt;
+};
+
+/* -------------------------------------------------- */
+/* UI bindings                                        */
+/* -------------------------------------------------- */
+document.getElementById('btnGen').addEventListener('click', generateCloze);
+document.getElementById('btnCheck').addEventListener('click', checkAnswers);
+
+document.getElementById('btnPromptRephrase').addEventListener('click', ()=>{
+  const p = buildRephrasePrompt();
+  if(p) document.getElementById('promptBox').value = p;
+});
+
+document.getElementById('btnPromptReal').addEventListener('click', ()=>{
+  const p = buildRealLifePrompt();
+  if(p) document.getElementById('promptBox').value = p;
+});
+
+document.getElementById('btnPromptHint').addEventListener('click', ()=>{
+  const p = buildHintPrompt();
+  if(p) document.getElementById('promptBox').value = p;
+});
+
+document.getElementById('btnCopyPrompt').addEventListener('click', async ()=>{
+  const box = document.getElementById('promptBox');
+  if(!box.value){ alert('Kein Prompt erzeugt.'); return; }
+  try{
+    await navigator.clipboard.writeText(box.value);
+  }catch(e){
+    box.select(); document.execCommand('copy');
+  }
+});
+</script>
+</body>
+</html>
